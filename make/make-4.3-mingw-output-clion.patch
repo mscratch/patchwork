@@ -1,0 +1,135 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..bea27e5
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,5 @@
++.vscode/
++
++Makefile
++config-flags.pm
++GccRel/
+diff --git a/src/config.h.W32 b/src/config.h.W32
+index be2a33e..f43c2ad 100644
+--- a/src/config.h.W32
++++ b/src/config.h.W32
+@@ -294,7 +294,7 @@ this program.  If not, see <http://www.gnu.org/licenses/>.  */
+ /* Define to 1 if `d_type' is a member of `struct dirent'. */
+ /* SV 57152: MinGW64 version of dirent doesn't support d_type. */
+ #ifndef __MINGW64__
+-# define HAVE_STRUCT_DIRENT_D_TYPE 1
++/* # define HAVE_STRUCT_DIRENT_D_TYPE 1 */
+ #endif
+ 
+ /* Define to 1 if you have the `isatty' function. */
+diff --git a/src/getopt.c b/src/getopt.c
+index 35e71ef..d78c06e 100644
+--- a/src/getopt.c
++++ b/src/getopt.c
+@@ -434,6 +434,9 @@ _getopt_initialize (int argc, char *const *argv, const char *optstring)
+     }
+   else
+     nonoption_flags_len = 0;
++#else
++  (void)argc;
++  (void)argv;
+ #endif
+ 
+   return optstring;
+@@ -676,7 +679,7 @@ _getopt_internal (int argc, char *const *argv, const char *optstring,
+ 		optarg = nameend + 1;
+ 	      else
+ 		{
+-		  if (opterr)
++		  if (opterr) {
+ 		   if (argv[optind - 1][1] == '-')
+ 		    /* --option */
+ 		    fprintf (stderr,
+@@ -687,7 +690,7 @@ _getopt_internal (int argc, char *const *argv, const char *optstring,
+ 		    fprintf (stderr,
+ 		     _("%s: option '%c%s' doesn't allow an argument\n"),
+ 		     argv[0], argv[optind - 1][0], pfound->name);
+-
++		  }
+ 		  nextchar += strlen (nextchar);
+ 
+ 		  optopt = pfound->val;
+diff --git a/src/main.c b/src/main.c
+index 78a27d7..e0a73cc 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -1117,8 +1117,11 @@ main (int argc, char **argv, char **envp)
+ 
+ #endif
+ 
++/* setlocale interferes with line buffering if using parallel make on MinGW */
++#ifndef __MINGW32__
+   /* Set up gettext/internationalization support.  */
+   setlocale (LC_ALL, "");
++#endif
+   /* The cast to void shuts up compiler warnings on systems that
+      disable NLS.  */
+   (void)bindtextdomain (PACKAGE, LOCALEDIR);
+diff --git a/src/output.c b/src/output.c
+index 2211749..227a33c 100644
+--- a/src/output.c
++++ b/src/output.c
+@@ -81,14 +81,15 @@ log_working_directory (int entering)
+ {
+   static char *buf = NULL;
+   static size_t len = 0;
+-  size_t need;
++  size_t need, dlen;
+   const char *fmt;
+-  char *p;
++  char *p, *dstr;
++  int msys_translated = 0;
+ 
+   /* Get enough space for the longest possible output.  */
+   need = strlen (program) + INTSTR_LENGTH + 2 + 1;
+   if (starting_directory)
+-    need += strlen (starting_directory);
++    need += (dlen = strlen (starting_directory));
+ 
+   /* Use entire sentences to give the translators a fighting chance.  */
+   if (makelevel == 0)
+@@ -129,15 +130,35 @@ log_working_directory (int entering)
+       *(p++) = ' ';
+     }
+ 
++  // If using MSYS, translate `/c/` into `c:/` etc.
++  // TODO: using config.h & macro
++  if (starting_directory && dlen >= sizeof("/c/") - 1) {
++    if (starting_directory[0] == '/' && isalpha(starting_directory[1]) && starting_directory[2] == '/') {
++      dstr = xmalloc(dlen + 1);
++      memcpy(dstr, starting_directory, dlen + 1);
++
++      dstr[0] = starting_directory[1];
++      dstr[1] = ':';
++      msys_translated = 1;
++    }
++  }
++  else {
++    dstr = starting_directory;
++  }
++
+   if (makelevel == 0)
+-    if (starting_directory == 0)
++    if (dstr == 0)
+       sprintf (p, fmt , program);
+     else
+-      sprintf (p, fmt, program, starting_directory);
+-  else if (starting_directory == 0)
++      sprintf (p, fmt, program, dstr);
++  else if (dstr == 0)
+     sprintf (p, fmt, program, makelevel);
+   else
+-    sprintf (p, fmt, program, makelevel, starting_directory);
++    sprintf (p, fmt, program, makelevel, dstr);
++
++  if (msys_translated) {
++    free(dstr);
++  }
+ 
+   _outputs (NULL, 0, buf);
+ 
