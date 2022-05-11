@@ -1,0 +1,137 @@
+diff --git a/src/heap_tcmalloc.cpp b/src/heap_tcmalloc.cpp
+index a643892..45c5951 100644
+--- a/src/heap_tcmalloc.cpp
++++ b/src/heap_tcmalloc.cpp
+@@ -19,6 +19,11 @@
+ #define CA_PRINT_DBG(format,args...)
+ #endif
+ 
++/**
++ * This flag indicates that tcmalloc is built with 3-level pagetable (to reduce memory usage)
++ * TODO: configurable?
++ */
++#define TCMALLOC_SMALL_BUT_SLOW 1
+ 
+ /*
+  * Internal data structures
+@@ -754,7 +759,7 @@ parse_pagemap_2_7(struct symbol *pageheap_, struct type *leaf_type,
+ 	struct value *pageheap, *storage;
+ 	struct value *pagemap;
+ 	struct type *pageheap_type;
+-	struct value *root_p, *root;
++	struct value *root;
+ 	LONGEST low_bound, high_bound, index;
+ 	const char *type_name;
+ 
+@@ -773,21 +778,31 @@ parse_pagemap_2_7(struct symbol *pageheap_, struct type *leaf_type,
+ 	pageheap = value_cast(pageheap_type, storage);
+ 
+ 	/*
++	 * 2-level:
+ 	 * tcmalloc::Static::pageheap_.memory.pagemap_
+ 	 * type = class TCMalloc_PageMap2<35> {
+ 	 *   private:
+ 	 *     TCMalloc_PageMap2<35>::Leaf *root_[131072];
+ 	 *     void *(*allocator_)(Number);
+ 	 * }
++	 *
++	 * 3-level:
++	 * tcmalloc::Static::pageheap_.memory.pagemap_
++	 * type = class TCMalloc_PageMap3<35> ...
+ 	 */
+ 	pagemap = get_field_value(pageheap, "pagemap_");
+ 	type_name = TYPE_NAME(check_typedef(value_type(pagemap)));
++#ifndef TCMALLOC_SMALL_BUT_SLOW
+ 	if (strcmp(type_name, "TCMalloc_PageMap2<35>") != 0) {
++#else
++	if (strcmp(type_name, "TCMalloc_PageMap3<35>") != 0) {
++#endif
+ 		CA_PRINT("Internal error: pageheap_.pagemap_ has unexpected type\n");
+ 		return false;
+ 	}
+ 	root = get_field_value(pagemap, "root_");
+ 
++#ifndef TCMALLOC_SMALL_BUT_SLOW
+ 	if (get_array_bounds (value_type(root), &low_bound, &high_bound) == 0) {
+ 		CA_PRINT("Could not determine \"root_\" bounds\n");
+ 		return false;
+@@ -810,6 +825,65 @@ parse_pagemap_2_7(struct symbol *pageheap_, struct type *leaf_type,
+ 		if (parse_leaf(leaf, span_type) == false)
+ 			return false;
+ 	}
++#else
++	// basically, it's identical to pagemap_2_5; FIXME: abstract using page-level
++	// e.g. `parse_pagemap_2level` and `parse_pagemap_3level`
++
++	/**
++	 * tcmalloc::Static::pageheap_.pagemap_.root_.ptrs
++	 */
++	struct value* ptrs;
++	ptrs = get_field_value(root, "ptrs");
++	if (TYPE_CODE (value_type(ptrs)) != TYPE_CODE_ARRAY) {
++		CA_PRINT("Unexpected \"ptrs\" is not an array\n");
++		return false;
++	}
++	if (get_array_bounds (value_type(ptrs), &low_bound, &high_bound) == 0) {
++		CA_PRINT("Could not determine \"ptrs\" bounds\n");
++		return false;
++	}
++	CA_PRINT_DBG("tcmalloc::Static::pageheap_.pagemap_.root_.ptrs[%ld-%ld] "
++	    "array length %ld\n", low_bound, high_bound,
++	    high_bound - low_bound + 1);
++
++	/*
++	 * tcmalloc::Static::pageheap_->pagemap_.root_.ptrs[index]
++	 */
++	for (index = low_bound; index <= high_bound; index++) {
++		struct value *ptr, *node;
++		struct value *ptrs2;
++		LONGEST low_bound2, high_bound2, index2;
++
++		ptr = value_subscript(ptrs, index);
++		if (value_as_address(ptr) == 0)
++			continue;
++		node = value_ind(ptr);
++		/*
++		 * tcmalloc::Static::pageheap_->pagemap_.root_.ptrs[index].ptrs
++		 */
++		ptrs2 = get_field_value(node, "ptrs");
++		get_array_bounds (value_type(ptrs2), &low_bound2, &high_bound2);
++		CA_PRINT_DBG("tcmalloc::Static::pageheap_->pagemap_.root_->ptrs[%ld]->ptrs[%ld-%ld] "
++		    "array length %ld\n", index, low_bound2, high_bound2,
++		    high_bound2 - low_bound2 + 1);
++
++		/*
++		 * tcmalloc::Static::pageheap_->pagemap_.root_.ptrs[index].ptrs[index2]
++		 */
++		for (index2 = low_bound2; index2 <= high_bound2; index2++) {
++			struct value *node2;
++			struct value *leaf_p, *leaf;
++
++			node2 = value_subscript(ptrs2, index2);
++			if (value_as_address(node2) == 0)
++				continue;
++			leaf_p = value_cast(leaf_type, node2);
++			leaf = value_ind(leaf_p);
++			if (parse_leaf(leaf, span_type) == false)
++				return false;
++		}
++	}
++#endif
+ 
+ 	return true;
+ }
+@@ -872,8 +946,13 @@ parse_pagemap(void)
+ 		if (!parse_pagemap_2_5(pageheap_, leaf_type, span_type))
+ 			return false;
+ 	} else if (tc_version_minor <= 7) {
++#ifndef TCMALLOC_SMALL_BUT_SLOW
+ 		/* Version 2.6+ uses two-leveled page map */
+ 		type_name = "TCMalloc_PageMap2<35>::Leaf";
++#else
++		/* However, you can config tcmalloc to use 3-level page map */
++		type_name = "TCMalloc_PageMap3<35>::Leaf";
++#endif
+ 		leaf_type = lookup_transparent_type(type_name);
+ 		if (leaf_type == NULL) {
+ 			CA_PRINT("Failed to lookup type \"%s\"\n", type_name);
